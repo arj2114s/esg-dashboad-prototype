@@ -18,23 +18,23 @@ st.markdown("### 📊 Scenarios: All Diesel vs. All EV vs. Smart Shift-Based All
 # ==========================================
 with st.sidebar:
     st.header("⚙️ Operational Parameters")
-    total_target = st.number_input("Total Daily Target (Tons)", value=9000, step=500)
 
     with st.expander("⚡ Shift Tariffs & Charging", expanded=True):
         st.info("Charging Speed affects EV productivity!")
         charger_kw = st.number_input("Charger Power (kW)", value=240, step=60, help="120kW=Slow, 360kW=Ultra Fast")
         charger_eff = st.slider("Charger Efficiency (%)", 80, 100, 90) / 100
 
-        s1_price = st.number_input("Shift 1 (06:00-14:00) [₹/kWh]", value=10.0)
-        s2_price = st.number_input("Shift 2 (14:00-22:00) [₹/kWh]", value=8.5)
-        s3_price = st.number_input("Shift 3 (22:00-06:00) [₹/kWh]", value=6.0)
+        # UPDATED TARIFFS BASED ON UPLOADED EXCEL SHEET (Weighted Averages)
+        s1_price = st.number_input("Shift 1 (06:00-14:00) [₹/kWh]", value=8.44)
+        s2_price = st.number_input("Shift 2 (14:00-22:00) [₹/kWh]", value=8.44)
+        s3_price = st.number_input("Shift 3 (22:00-06:00) [₹/kWh]", value=7.18)
+        
         shift_hours = 8
         t_load = st.number_input("Loading Time (mins)", value=30)
         t_unload = st.number_input("Unloading Time (mins)", value=30)
         tat_mins = t_load + t_unload
 
     # --- TRUCK PRESET DATA ---
-    # Dictionary keys must match selectbox options EXACTLY
     truck_presets = {
         "Tata Prima 2830.K (Diesel)": {
             "capex": 55.0, "maint": 4.0, "tyre": 7.2, "payload": 17.5,
@@ -54,7 +54,6 @@ with st.sidebar:
 
         # --- DIESEL SPECS ---
         st.markdown("### 🛢️ Diesel Truck")
-        # FIXED: List matches dictionary key
         d_model_select = st.selectbox("Select Diesel Model", ["Tata Prima 2830.K (Diesel)"], index=0)
         d_data = truck_presets[d_model_select]
 
@@ -77,7 +76,6 @@ with st.sidebar:
 
         # --- EV SPECS ---
         st.markdown("### ⚡ Electric Truck")
-        # FIXED: List matches dictionary keys
         e_model_select = st.selectbox("Select EV Model", ["Olectra Megha 6x4 (Electric)", "Tata Prima E.28K (Electric)"], index=0)
         e_data = truck_presets[e_model_select]
 
@@ -111,25 +109,32 @@ with st.sidebar:
     eta_motor = 0.90
     eta_regen = 0.60
     grid_emission = 0.72
-    shovel_bucket_tons = 3.5
-    shovel_cycle_sec = 35
-    num_shovels = 2
 
 # ==========================================
-# 2. MINE CONFIGURATION
+# 2. MINE CONFIGURATION (INDIVIDUAL TARGETS)
 # ==========================================
+st.markdown("### ⛏️ Mine Configuration")
 c1, c2, c3 = st.columns(3)
-shift_target = total_target // 3
 
 with c1:
-    m1_dist = st.number_input("M1 Distance (km)", value=12)
+    m1_target = st.number_input("M1 Daily Target (Tons)", value=3000, step=500)
+    m1_dist = st.number_input("M1 Distance (km)", value=12.0)
     m1_slope = st.number_input("M1 Slope (%)", value=8.0)
 with c2:
-    m2_dist = st.number_input("M2 Distance (km)", value=25)
+    m2_target = st.number_input("M2 Daily Target (Tons)", value=3000, step=500)
+    m2_dist = st.number_input("M2 Distance (km)", value=25.0)
     m2_slope = st.number_input("M2 Slope (%)", value=2.0)
 with c3:
-    m3_dist = st.number_input("M3 Distance (km)", value=45)
+    m3_target = st.number_input("M3 Daily Target (Tons)", value=3000, step=500)
+    m3_dist = st.number_input("M3 Distance (km)", value=45.0)
     m3_slope = st.number_input("M3 Slope (%)", value=1.0)
+
+# Calculate Per-Shift Targets
+shift_target_m1 = m1_target / 3
+shift_target_m2 = m2_target / 3
+shift_target_m3 = m3_target / 3
+
+total_target = m1_target + m2_target + m3_target
 
 # ==========================================
 # 3. PHYSICS ENGINE
@@ -227,8 +232,20 @@ def calculate_shift_logistics(dist, slope, d_trucks, e_trucks, shift_tariff, yea
         "fuel_cost": fuel_cost_actual, "energy_cost": energy_cost_actual
     }
 
+def get_required_trucks(dist, slope, target, tariff, v_type):
+    """Helper function to find exact trucks needed for a single shift/mine"""
+    if target <= 0: return 0
+    for n in range(1, 150):
+        if v_type == "Diesel":
+            r = calculate_shift_logistics(dist, slope, n, 0, tariff)
+        else:
+            r = calculate_shift_logistics(dist, slope, 0, n, tariff)
+        if r and r['tons'] >= target:
+            return n
+    return 150 # Failsafe
+
 # ==========================================
-# 4. FIXED SCENARIO CALCULATOR
+# 4. FIXED SCENARIO CALCULATOR (UPDATED)
 # ==========================================
 def calculate_fixed_scenario(scenario_type):
     total_d_trucks = 0; total_e_trucks = 0
@@ -236,23 +253,29 @@ def calculate_fixed_scenario(scenario_type):
     total_d_trips = 0; total_e_trips = 0; total_liters = 0; total_kwh = 0
     total_fuel_cost = 0; total_energy_cost = 0
 
+    mine_configs = [
+        (m1_dist, m1_slope, shift_target_m1),
+        (m2_dist, m2_slope, shift_target_m2),
+        (m3_dist, m3_slope, shift_target_m3)
+    ]
+
     for tariff in [s1_price, s2_price, s3_price]:
         shift_d = 0; shift_e = 0
-        for mine_idx, (dist, slope) in enumerate([(m1_dist, m1_slope), (m2_dist, m2_slope), (m3_dist, m3_slope)]):
-            for n in range(1, 150):
-                if scenario_type == "Diesel":
-                    r = calculate_shift_logistics(dist, slope, n, 0, tariff, year_idx=0)
-                    if r['tons'] >= (shift_target/3):
-                        shift_d += n; total_cost+=r['cost']; total_co2+=r['co2']; total_time+=r['time']; total_tons+=r['tons']; total_d_trips+=r['d_trips']
-                        total_liters += r['liters']; total_fuel_cost += r['fuel_cost']
-                        break
-                else:
-                    r = calculate_shift_logistics(dist, slope, 0, n, tariff, year_idx=0)
-                    if r is None: break
-                    if r['tons'] >= (shift_target/3):
-                        shift_e += n; total_cost+=r['cost']; total_co2+=r['co2']; total_time+=r['time']; total_tons+=r['tons']; total_e_trips+=r['e_trips']
-                        total_kwh += r['kwh']; total_energy_cost += r['energy_cost']
-                        break
+        for dist, slope, starget in mine_configs:
+            n = get_required_trucks(dist, slope, starget, tariff, scenario_type)
+            if scenario_type == "Diesel":
+                r = calculate_shift_logistics(dist, slope, n, 0, tariff)
+                shift_d += n
+                if r:
+                    total_cost+=r['cost']; total_co2+=r['co2']; total_time+=r['time']; total_tons+=r['tons']; total_d_trips+=r['d_trips']
+                    total_liters += r['liters']; total_fuel_cost += r['fuel_cost']
+            else:
+                r = calculate_shift_logistics(dist, slope, 0, n, tariff)
+                shift_e += n
+                if r:
+                    total_cost+=r['cost']; total_co2+=r['co2']; total_time+=r['time']; total_tons+=r['tons']; total_e_trips+=r['e_trips']
+                    total_kwh += r['kwh']; total_energy_cost += r['energy_cost']
+
         total_d_trucks = max(total_d_trucks, shift_d)
         total_e_trucks = max(total_e_trucks, shift_e)
 
@@ -265,17 +288,23 @@ def calculate_fixed_scenario(scenario_type):
 class SingleShiftProblem(ElementwiseProblem):
     def __init__(self, tariff):
         self.tariff = tariff
-        super().__init__(n_var=6, n_obj=3, n_ieq_constr=1, xl=0, xu=60, vtype=int)
+        super().__init__(n_var=6, n_obj=3, n_ieq_constr=3, xl=0, xu=60, vtype=int)
+        
     def _evaluate(self, x, out, *args, **kwargs):
         d1, e1, d2, e2, d3, e3 = x
         r1 = calculate_shift_logistics(m1_dist, m1_slope, d1, e1, self.tariff, year_idx=0)
         r2 = calculate_shift_logistics(m2_dist, m2_slope, d2, e2, self.tariff, year_idx=0)
         r3 = calculate_shift_logistics(m3_dist, m3_slope, d3, e3, self.tariff, year_idx=0)
+        
         if r1 and r2 and r3:
             out["F"] = [r1['cost']+r2['cost']+r3['cost'], r1['co2']+r2['co2']+r3['co2'], r1['time']+r2['time']+r3['time']]
-            out["G"] = [shift_target - (r1['tons'] + r2['tons'] + r3['tons'])]
+            out["G"] = [
+                shift_target_m1 - r1['tons'], 
+                shift_target_m2 - r2['tons'], 
+                shift_target_m3 - r3['tons']
+            ]
         else:
-            out["F"] = [1e9, 1e9, 1e9]; out["G"] = [1000]
+            out["F"] = [1e9, 1e9, 1e9]; out["G"] = [1000, 1000, 1000]
 
 # ==========================================
 # 6. RUN SIMULATIONS & TABS
@@ -292,7 +321,9 @@ with tab1:
         s3_opt = minimize(SingleShiftProblem(s3_price), NSGA2(pop_size=60), get_termination("n_gen", 40), seed=1)
 
         def extract_best(res, tariff):
-            if len(res.X) == 0: return {"cost":0, "co2":0, "time":0, "d_trucks":0, "e_trucks":0, "d_trips":0, "e_trips":0, "tons":0, "liters":0, "kwh":0, "fuel_cost":0, "energy_cost":0}
+            if len(res.X) == 0: 
+                return {"cost":0, "co2":0, "time":0, "d_trucks":0, "e_trucks":0, "d_trips":0, "e_trips":0, "tons":0, "liters":0, "kwh":0, "fuel_cost":0, "energy_cost":0, 
+                        "m1_d":0, "m1_e":0, "m2_d":0, "m2_e":0, "m3_d":0, "m3_e":0}
             idx = np.argsort(res.F[:, 0])[0]
             x = res.X[idx]
             r1 = calculate_shift_logistics(m1_dist, m1_slope, x[0], x[1], tariff)
@@ -307,7 +338,10 @@ with tab1:
                 "liters": r1['liters']+r2['liters']+r3['liters'],
                 "kwh": r1['kwh']+r2['kwh']+r3['kwh'],
                 "fuel_cost": r1['fuel_cost']+r2['fuel_cost']+r3['fuel_cost'],
-                "energy_cost": r1['energy_cost']+r2['energy_cost']+r3['energy_cost']
+                "energy_cost": r1['energy_cost']+r2['energy_cost']+r3['energy_cost'],
+                "m1_d": int(x[0]), "m1_e": int(x[1]),
+                "m2_d": int(x[2]), "m2_e": int(x[3]),
+                "m3_d": int(x[4]), "m3_e": int(x[5])
             }
 
         o1 = extract_best(s1_opt, s1_price)
@@ -351,12 +385,152 @@ with tab1:
         st.plotly_chart(fig2, use_container_width=True)
 
     st.markdown("---")
-    st.header("🌙 Optimized Scenario: Shift-Wise Fleet Deployment")
-    shift_table = pd.DataFrame({
-        "Shift": ["Shift 1 (Morning)", "Shift 2 (Evening)", "Shift 3 (Night)"],
-        "Tariff (₹/kWh)": [s1_price, s2_price, s3_price],
-        "Diesel Trucks Active": [o1['d_trucks'], o2['d_trucks'], o3['d_trucks']],
-        "EV Trucks Active": [o1['e_trucks'], o2['e_trucks'], o3['e_trucks']]
-    })
-    st.dataframe(shift_table, use_container_width=True, hide_index=True)
+    st.header("🌙 Detailed Mine-Wise Deployment (All Scenarios)")
+    
+    # Generate detailed breakdowns dynamically for All Diesel and All EV
+    shift_tariffs = [s1_price, s2_price, s3_price]
+    detailed_data = []
 
+    for s_idx, tariff in enumerate(shift_tariffs):
+        shift_name = f"Shift {s_idx+1}"
+        
+        # Scenario 1: All Diesel
+        d_m1 = get_required_trucks(m1_dist, m1_slope, shift_target_m1, tariff, "Diesel")
+        d_m2 = get_required_trucks(m2_dist, m2_slope, shift_target_m2, tariff, "Diesel")
+        d_m3 = get_required_trucks(m3_dist, m3_slope, shift_target_m3, tariff, "Diesel")
+        detailed_data.append(["All Diesel", shift_name, d_m1, 0, d_m2, 0, d_m3, 0, d_m1+d_m2+d_m3])
+
+        # Scenario 2: All EV
+        e_m1 = get_required_trucks(m1_dist, m1_slope, shift_target_m1, tariff, "EV")
+        e_m2 = get_required_trucks(m2_dist, m2_slope, shift_target_m2, tariff, "EV")
+        e_m3 = get_required_trucks(m3_dist, m3_slope, shift_target_m3, tariff, "EV")
+        detailed_data.append(["All EV", shift_name, 0, e_m1, 0, e_m2, 0, e_m3, e_m1+e_m2+e_m3])
+
+        # Scenario 3: Optimized
+        opt_data = [o1, o2, o3][s_idx]
+        tot_opt = opt_data['m1_d']+opt_data['m1_e']+opt_data['m2_d']+opt_data['m2_e']+opt_data['m3_d']+opt_data['m3_e']
+        detailed_data.append(["Optimized", shift_name, opt_data['m1_d'], opt_data['m1_e'], opt_data['m2_d'], opt_data['m2_e'], opt_data['m3_d'], opt_data['m3_e'], tot_opt])
+
+    # Convert to DataFrame
+    detailed_df = pd.DataFrame(detailed_data, columns=[
+        "Scenario", "Shift", 
+        "Mine 1 (Diesel)", "Mine 1 (EV)", 
+        "Mine 2 (Diesel)", "Mine 2 (EV)", 
+        "Mine 3 (Diesel)", "Mine 3 (EV)", 
+        "Total Active Trucks"
+    ])
+
+    # Display the final large table
+    st.dataframe(detailed_df.style.highlight_max(subset=["Total Active Trucks"], color='lightgreen').set_properties(**{'text-align': 'center'}), use_container_width=True, hide_index=True)
+
+with tab2:
+    st.header("💸 Financial Return on Investment")
+    capex_d = sc1['d_trucks'] * d_capex * 100000
+    capex_e = sc2['e_trucks'] * e_capex * 100000
+    capex_opt = (sc3['d_trucks']*d_capex + sc3['e_trucks']*e_capex) * 100000
+
+    cf_d = []; cf_e = []; cf_opt = []
+    cuml_d = -capex_d; cuml_e = -capex_e; cuml_opt = -capex_opt
+    days_yr = 300
+
+    for yr in range(1, project_years + 1):
+        cuml_d -= (sc1['cost'] * days_yr)
+        cf_d.append(cuml_d)
+        opex_e = sc2['cost'] * days_yr
+        if yr == batt_repl_year: opex_e += (sc2['e_trucks'] * batt_repl_cost * 100000)
+        cuml_e -= opex_e
+        cf_e.append(cuml_e)
+        opex_opt = sc3['cost'] * days_yr
+        if yr == batt_repl_year: opex_opt += (sc3['e_trucks'] * batt_repl_cost * 100000)
+        cuml_opt -= opex_opt
+        cf_opt.append(cuml_opt)
+
+    yrs = list(range(1, project_years + 1))
+    fig_roi = go.Figure()
+    fig_roi.add_trace(go.Scatter(x=yrs, y=[int(x/1e7) for x in cf_d], mode='lines+markers', name='All Diesel', line=dict(color='red')))
+    fig_roi.add_trace(go.Scatter(x=yrs, y=[int(x/1e7) for x in cf_e], mode='lines+markers', name='All EV', line=dict(color='green')))
+    fig_roi.add_trace(go.Scatter(x=yrs, y=[int(x/1e7) for x in cf_opt], mode='lines+markers', name='Optimized', line=dict(color='blue')))
+    fig_roi.update_layout(title="Cumulative Cash Flow (NPV Preview)", xaxis_title="Year", yaxis_title="Net Cash Position (₹ Crores)")
+    st.plotly_chart(fig_roi, use_container_width=True)
+
+with tab3:
+    st.header("📉 Sensitivity Analysis")
+    d_range = np.linspace(90, 140, 20)
+    fixed_d = sc1['cost'] - sc1['fuel_cost']
+    fixed_opt_d = sc3['cost'] - sc3['fuel_cost']
+    res_d_sens = []
+    res_opt_sens = []
+
+    for p in d_range:
+        res_d_sens.append(int(fixed_d + (sc1['liters'] * p)))
+        res_opt_sens.append(int(fixed_opt_d + (sc3['liters'] * p)))
+
+    fig_d = go.Figure()
+    fig_d.add_trace(go.Scatter(x=d_range, y=res_d_sens, mode='lines', name='All Diesel', line=dict(color='red')))
+    fig_d.add_trace(go.Scatter(x=d_range, y=res_opt_sens, mode='lines', name='Optimized Hybrid', line=dict(color='blue')))
+    fig_d.update_layout(xaxis_title="Diesel Price (₹/Liter)", yaxis_title="Daily Operating Cost (₹)")
+    st.plotly_chart(fig_d, use_container_width=True)
+
+    st.subheader("Combined Sensitivity Heatmap")
+    e_range = np.linspace(4, 18, 20)
+    base_fixed_opt = sc3['cost'] - sc3['fuel_cost'] - sc3['energy_cost']
+    z_data = []
+    for e_p in e_range:
+        row = []
+        for d_p in d_range:
+            row.append(int(base_fixed_opt + (sc3['liters'] * d_p) + (sc3['kwh'] * e_p)))
+        z_data.append(row)
+    fig_heat = go.Figure(data=go.Heatmap(z=z_data, x=d_range, y=e_range, colorscale='RdBu_r'))
+    fig_heat.update_layout(xaxis_title="Diesel Price", yaxis_title="Electricity Price")
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+with tab4:
+    st.header("🧬 Pareto Analysis (Trade-off Visualization)")
+    F = s1_opt.F
+    if len(F) > 0:
+        pareto_df = pd.DataFrame(F, columns=["Cost", "CO2", "Time"]).astype(int)
+
+        st.subheader("1. 3D Solution Space")
+        fig_3d = px.scatter_3d(
+            pareto_df, x="Cost", y="CO2", z="Time",
+            color="Cost", size_max=18, opacity=0.8,
+            title="Pareto Front (Cost vs CO2 vs Time)"
+        )
+        fig_3d.update_layout(height=700, scene=dict(aspectmode='cube'))
+        st.plotly_chart(fig_3d, use_container_width=True)
+
+        st.markdown("---")
+
+        st.subheader("2. Cost vs. Emissions Trade-off")
+        fig_2d = px.scatter(
+            pareto_df, x="Cost", y="CO2", color="Time",
+            color_continuous_scale="Viridis", size_max=15,
+            labels={"Cost": "Cost (₹)", "CO2": "CO2 (kg)", "Time": "Time (hrs)"}
+        )
+        st.plotly_chart(fig_2d, use_container_width=True)
+
+        st.subheader("3. Strategy Comparison Flow")
+        fig_par = px.parallel_coordinates(
+            pareto_df, color="Cost",
+            labels={"Cost": "Cost (₹)", "CO2": "CO2 (kg)", "Time": "Time (h)"},
+            color_continuous_scale=px.colors.diverging.Tealrose
+        )
+        fig_par.update_layout(margin=dict(l=60, r=60, t=50, b=50))
+        st.plotly_chart(fig_par, use_container_width=True)
+
+with tab5:
+    st.header("🔌 Infrastructure Planning")
+    st.metric("Charger Power Selected", f"{charger_kw} kW")
+    max_evs_active = sc3['e_trucks']
+    daily_kwh = sc3['kwh']
+
+    ports_energy = daily_kwh / (charger_kw * 24 * 0.9)
+    time_charge_hrs = e_batt_capacity / charger_kw
+    slots_per_shift = 8.0 / time_charge_hrs
+    ports_peak = max_evs_active / slots_per_shift
+    final_ports = int(np.ceil(max(ports_energy, ports_peak) * 1.1))
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Max Active EVs", f"{max_evs_active}")
+    c2.metric("Charging Time (0-100%)", f"{int(time_charge_hrs*60)} mins")
+    c3.metric("Recommended Ports", f"{final_ports}", delta="Based on Peak Shift")
